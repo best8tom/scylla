@@ -250,6 +250,10 @@ modes = {
         'cxxflags': '',
         'cxx_ld_flags': '-O1',
     },
+    'sanitize': {
+        'cxxflags': '-DDEBUG -DDEBUG_LSA_SANITIZER',
+        'cxx_ld_flags': '-Os',
+    }
 }
 
 scylla_tests = [
@@ -362,7 +366,7 @@ scylla_tests = [
     'tests/imr_test',
     'tests/partition_data_test',
     'tests/reusable_buffer_test',
-    'tests/multishard_writer_test',
+    'tests/mutation_writer_test',
     'tests/observable_test',
     'tests/transport_test',
     'tests/fragmented_temporary_buffer_test',
@@ -718,13 +722,14 @@ scylla_core = (['database.cc',
                 'utils/arch/powerpc/crc32-vpmsum/crc32_wrapper.cc',
                 'querier.cc',
                 'data/cell.cc',
-                'multishard_writer.cc',
+                'mutation_writer/multishard_writer.cc',
                 'multishard_mutation_query.cc',
                 'reader_concurrency_semaphore.cc',
                 'distributed_loader.cc',
                 'utils/utf8.cc',
                 'utils/ascii.cc',
                 'utils/like_matcher.cc',
+                'mutation_writer/timestamp_based_splitting_writer.cc',
                 ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')]
                )
 
@@ -803,6 +808,7 @@ scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependenci
     'tests/mutation_source_test.cc',
     'tests/data_model.cc',
     'tests/exception_utils.cc',
+    'tests/random_schema.cc',
 ]
 
 deps = {
@@ -1035,6 +1041,7 @@ total_memory = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
 link_pool_depth = max(int(total_memory / 7e9), 1)
 
 selected_modes = args.selected_modes or modes.keys()
+default_modes = args.selected_modes or ['debug', 'release', 'dev']
 build_modes =  {m: modes[m] for m in selected_modes}
 build_artifacts = all_artifacts if not args.artifacts else args.artifacts
 
@@ -1067,8 +1074,8 @@ modes['debug']['cxxflags'] += ' -gz'
 flag_dest = 'cxx_ld_flags' if args.compress_exec_debuginfo else 'cxxflags'
 modes['release'][flag_dest] += ' -gz'
 
-modes['debug']['cxxflags'] += ' ' + dbgflag
-modes['release']['cxxflags'] += ' ' + dbgflag
+for m in ['debug', 'release', 'sanitize']:
+    modes[m]['cxxflags'] += ' ' + dbgflag
 
 seastar_cflags = args.user_cflags
 seastar_cflags += ' -Wno-error'
@@ -1121,6 +1128,12 @@ if not os.path.exists(xxhash_dir) or not os.listdir(xxhash_dir):
 
 if not args.staticboost:
     args.user_cflags += ' -DBOOST_TEST_DYN_LINK'
+
+# thrift version detection, see #4538
+thrift_version = subprocess.check_output(["thrift", "-version"]).decode("utf-8").split(" ")[-1]
+thrift_boost_versions = ["0.{}.".format(n) for n in range(1, 11)]
+if any(filter(thrift_version.startswith, thrift_boost_versions)):
+    args.user_cflags += ' -DTHRIFT_USES_BOOST'
 
 for pkg in pkgs:
     args.user_cflags += ' ' + pkg_config(pkg, '--cflags')
@@ -1389,7 +1402,7 @@ with open(buildfile, 'w') as f:
             description = CLEAN
         build clean: clean
         default {modes_list}
-        ''').format(modes_list=' '.join(build_modes), **globals()))
+        ''').format(modes_list=' '.join(default_modes), **globals()))
     f.write(textwrap.dedent('''\
         build always: phony
         rule scylla_version_gen
